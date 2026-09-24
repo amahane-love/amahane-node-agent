@@ -1,0 +1,22 @@
+[Unit]
+Description=Amahane node agent (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+EnvironmentFile=/etc/amahane/credentials/node-agent-%i.env
+ExecStart=/usr/local/bin/amahane-node-agent
+Restart=on-failure
+RestartSec=10
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+
+[Install]
+WantedBy=multi-user.target
