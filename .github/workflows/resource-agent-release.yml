@@ -1,0 +1,163 @@
+name: Resource agent release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Existing or new semver release tag to receive resource-agent assets'
+        required: true
+        default: 'v1.1.0'
+        type: string
+      source_ref:
+        description: 'Branch or commit containing the resource-agent source'
+        required: true
+        default: 'main'
+        type: string
+
+env:
+  RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+  SOURCE_REF: ${{ inputs.source_ref || github.ref }}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: resource-agent-release-${{ inputs.release_tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Go tests
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out staging repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: amahane-resource-agent/go.mod
+          cache: false
+
+      - name: Validate version tag
+        env:
+          RELEASE_TAG: ${{ env.RELEASE_TAG }}
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Expected a semantic version tag such as v1.2.3; got: $RELEASE_TAG" >&2
+            exit 1
+          fi
+
+      - name: Test archive module
+        working-directory: amahane-resource-archive
+        run: go test ./...
+
+      - name: Test resource agent module
+        working-directory: amahane-resource-agent
+        run: go test ./...
+
+  build:
+    name: Build Linux ${{ matrix.goarch }}
+    needs: test
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        goarch: [amd64, arm64]
+    steps:
+      - name: Check out staging repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: amahane-resource-agent/go.mod
+          cache: false
+
+      - name: Build resource agent
+        env:
+          TARGET_GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p dist
+          cd amahane-resource-agent
+          CGO_ENABLED=0 GOOS=linux GOARCH="$TARGET_GOARCH" \
+            go build -trimpath -buildvcs=false -ldflags='-s -w' \
+            -o "../dist/amahane-resource-agent-linux-$TARGET_GOARCH" .
+
+      - name: Upload binary
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: resource-agent-linux-${{ matrix.goarch }}
+          path: dist/amahane-resource-agent-linux-${{ matrix.goarch }}
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - name: Check out release metadata
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          persist-credentials: false
+
+      - name: Download architecture binaries
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with:
+          pattern: resource-agent-linux-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create SHA256 manifest
+        run: |
+          cp infra/systemd/amahane-resource-agent.service dist/amahane-resource-agent.service
+          cd dist
+          sha256sum \
+            amahane-resource-agent-linux-amd64 \
+            amahane-resource-agent-linux-arm64 > SHA256SUMS
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
+        with:
+          cosign-release: v3.0.6
+
+      - name: Sign release assets with GitHub OIDC
+        run: |
+          cosign sign-blob --yes \
+            --bundle dist/amahane-resource-agent-linux-amd64.sigstore.json \
+            dist/amahane-resource-agent-linux-amd64
+          cosign sign-blob --yes \
+            --bundle dist/amahane-resource-agent-linux-arm64.sigstore.json \
+            dist/amahane-resource-agent-linux-arm64
+          cosign sign-blob --yes \
+            --bundle dist/SHA256SUMS.sigstore.json \
+            dist/SHA256SUMS
+
+      - name: Publish resource-agent assets
+        uses: softprops/action-gh-release@e598afbe1493e6b1bafb1f389cabb956eab91231
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          files: |
+            dist/amahane-resource-agent-linux-amd64
+            dist/amahane-resource-agent-linux-arm64
+            dist/amahane-resource-agent.service
+            dist/SHA256SUMS
+            dist/amahane-resource-agent-linux-amd64.sigstore.json
+            dist/amahane-resource-agent-linux-arm64.sigstore.json
+            dist/SHA256SUMS.sigstore.json
+          generate_release_notes: false
+          fail_on_unmatched_files: true

@@ -6,28 +6,50 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
+      fail-fast: false
       matrix:
-        include:
-          - goos: linux
-            goarch: amd64
-          - goos: linux
-            goarch: arm64
+        goarch: [amd64, arm64]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
         with:
-          go-version: "1.22"
-      - run: go build -trimpath -ldflags "-s -w" -o amahane-node-agent-${{ matrix.goos }}-${{ matrix.goarch }} .
+          go-version-file: go.mod
+          cache: false
+      - name: Build node agent
         env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-      - uses: softprops/action-gh-release@v2
+          TARGET_GOARCH: ${{ matrix.goarch }}
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH="$TARGET_GOARCH" \
+            go build -trimpath -buildvcs=false -ldflags='-s -w' \
+            -o "amahane-node-agent-linux-$TARGET_GOARCH" .
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
-          files: amahane-node-agent-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: node-agent-linux-${{ matrix.goarch }}
+          path: amahane-node-agent-linux-${{ matrix.goarch }}
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with:
+          pattern: node-agent-linux-*
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@e598afbe1493e6b1bafb1f389cabb956eab91231
+        with:
+          files: |
+            dist/amahane-node-agent-linux-amd64
+            dist/amahane-node-agent-linux-arm64
           generate_release_notes: true
